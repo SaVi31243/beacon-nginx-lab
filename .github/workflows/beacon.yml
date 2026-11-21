@@ -1,0 +1,114 @@
+name: Beacon container verification
+run-name: Beacon / ${{ github.event_name }} / ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  command:
+    name: Command unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test packages
+        run: |
+          mkdir -p artifacts
+          python -m pip install -r requirements.txt 2>&1 | tee artifacts/install.log
+      - name: Check subprocess behavior
+        run: |
+          python -m pytest -v tests/unit --junitxml=artifacts/unit.xml \
+            2>&1 | tee artifacts/unit.log
+      - name: Upload unit-test reports
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: beacon-command-report
+          path: artifacts/
+          retention-days: 7
+
+  live:
+    name: Nginx container and HTTP checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BASE_URL: http://127.0.0.1:8468
+      EXPECTED_RELEASE: devops6-beacon-58
+      CHECK_TIMEOUT: '3'
+      CONTAINER_NAME: beacon-web
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test packages
+        run: |
+          mkdir -p artifacts
+          python -m pip install -r requirements.txt 2>&1 | tee artifacts/install.log
+      - name: Build and launch the pinned image
+        run: |
+          docker build -t "beacon-web:$GITHUB_SHA" . 2>&1 | tee artifacts/build.log
+          docker run -d --name "$CONTAINER_NAME" -p 127.0.0.1:8468:8080 \
+            "beacon-web:$GITHUB_SHA"
+      - name: Wait for a local HTTP response
+        id: wait
+        run: |
+          timeout 18s bash -c '
+            until curl -fsS --max-time 2 "$BASE_URL/" > /dev/null; do
+              sleep 0.5
+            done
+          ' 2>&1 | tee artifacts/wait.log
+          echo "Beacon answers on the mapped port"
+      - name: Check the image from inside
+        run: |
+          python -m pytest -v --hosts="docker://$CONTAINER_NAME" tests/infra \
+            --junitxml=artifacts/infra.xml 2>&1 | tee artifacts/infra.log
+      - name: Check HTTP status and response bodies
+        if: ${{ !cancelled() && steps.wait.outcome == 'success' }}
+        run: |
+          python -m pytest -v tests/http --junitxml=artifacts/http.xml \
+            2>&1 | tee artifacts/http.log
+      - name: Verify the release with curl
+        if: ${{ !cancelled() && steps.wait.outcome == 'success' }}
+        run: python check_beacon.py 2>&1 | tee artifacts/release.log
+      - name: Save Nginx logs and remove the container
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker ps -a --filter "name=$CONTAINER_NAME" > artifacts/containers.txt
+          if docker inspect "$CONTAINER_NAME" > /dev/null 2>&1; then
+            docker logs "$CONTAINER_NAME" > artifacts/nginx.log 2>&1 || true
+            docker rm -f "$CONTAINER_NAME" 2>&1 | tee artifacts/cleanup.log
+          fi
+      - name: Upload container and HTTP evidence
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: beacon-live-report
+          path: artifacts/
+          retention-days: 7
+
+  ready:
+    name: Готовність підтверджено
+    needs: [command, live]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Готовність підтверджено
+        run: echo "Both verification jobs finished successfully"

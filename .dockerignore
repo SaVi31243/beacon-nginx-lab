@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!nginx/
+!nginx/beacon.conf
+!public/
+!public/index.html
+!public/health.json
